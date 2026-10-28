@@ -1,0 +1,46 @@
+# Secrets
+cron.env
+watch.env
+.env
+
+# Lock files and logs (cron_ctl.sh)
+*.lock
+*.log
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+
+# Your own tracking data: which aircraft you're watching and where they've been
+targets.csv
+ignored.csv
+history.csv
+
+# Downloaded sources, rebuilt by update_data.py
+ReleasableAircraft.zip
+basic-ac-db.json.gz
+airports.csv
+part135.xlsx
+*.cap
+# (the FAA's loose extracts, if you ever unzip them here)
+/MASTER.txt
+/ACFTREF.txt
+/ENGINE.txt
+/DEREG.txt
+/RESERVED.txt
+/DEALER.txt
+/DOCINDEX.txt
+
+# Built from the downloads
+faa.db
+candidates.csv
+part135.csv
+
+# Generated output
+flights.html
+tracker_map.html
+report.txt
+
+# Machine-specific (absolute paths); cron_ctl.sh start writes it
+cron.crontab

@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight history</title>
+<style>
+  :root { color-scheme: dark; --bg:#070d16; --panel:#0e1726; --line:#1f2d44; --text:#dbe6f5; --dim:#7f93b0; --accent:#5fb3ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+               font:13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; cursor:grab; display:block; }
+  canvas.drag { cursor:grabbing; }
+  #panel { position:fixed; top:12px; left:12px; bottom:70px; width:320px; max-width:calc(100% - 24px);
+           background:rgba(14,23,38,.92); border:1px solid var(--line); border-radius:8px;
+           display:flex; flex-direction:column; }
+  #panel h1 { font-size:14px; margin:0; padding:10px 12px 2px; }
+  #note { padding:0 12px 8px; color:var(--dim); font-size:11.5px; }
+  #tools { padding:0 12px 8px; display:flex; gap:6px; }
+  button { background:#16233a; color:var(--text); border:1px solid var(--line); border-radius:5px;
+           padding:3px 9px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  ul { list-style:none; margin:0; padding:0; overflow-y:auto; border-top:1px solid var(--line); flex:1; }
+  li { border-bottom:1px solid var(--line); padding:7px 12px; }
+  li.off .name { opacity:.45; }
+  .row { display:flex; align-items:center; gap:8px; }
+  .sw { width:11px; height:11px; border-radius:50%; flex:none; }
+  .name { cursor:pointer; flex:1; min-width:0; }
+  .tail { font-weight:600; }
+  .sub { color:var(--dim); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tag { color:#ffd479; font-size:11px; }
+  .detail { display:none; margin:6px 0 2px 19px; font:11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; color:var(--dim); }
+  li.open .detail { display:block; }
+  .detail a { color:var(--accent); }
+  #bar { position:fixed; left:12px; right:12px; bottom:12px; height:46px; background:rgba(14,23,38,.92);
+         border:1px solid var(--line); border-radius:8px; display:flex; align-items:center; gap:12px; padding:0 12px; }
+  #slider { flex:1; accent-color:var(--accent); }
+  #when { width:150px; text-align:right; font-variant-numeric:tabular-nums; }
+  #labels div { position:fixed; left:0; top:0; font-size:10.5px; color:#cfe3ff; pointer-events:none;
+                text-shadow:0 0 3px #000, 0 0 3px #000; white-space:nowrap; }
+  #labels div.tag { font-size:12px; font-weight:700; }
+  #updated { padding:6px 12px; border-top:1px solid var(--line); color:var(--dim); font-size:11px; }
+  #tip { position:fixed; left:0; top:0; display:none; pointer-events:none; z-index:5; max-width:300px;
+         background:rgba(14,23,38,.96); border:1px solid var(--accent); border-radius:6px; padding:7px 10px;
+         font:11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space:nowrap; }
+  #tip b { font:600 12.5px system-ui, sans-serif; display:block; margin-bottom:3px; }
+  #tip .more { color:var(--dim); }
+  canvas.hover { cursor:pointer; }
+  #empty { position:fixed; inset:0; display:none; align-items:center; justify-content:center; color:var(--dim); }
+  @media (max-width:640px) { #panel { width:auto; right:12px; bottom:auto; max-height:40%; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h1 id="title">Flight history</h1>
+  <div id="note">Arcs join consecutive known positions. They are not the path flown. Drag to rotate, scroll to zoom.</div>
+  <div id="tools"><button id="all">All</button><button id="none">None</button></div>
+  <ul id="list"></ul>
+  <div id="updated"></div>
+</div>
+<div id="bar"><button id="play" title="Replay">&#9654;</button><input id="slider" type="range"><span id="when"></span></div>
+<div id="labels"></div>
+<div id="tip"></div>
+<div id="empty">No aircraft to show.</div>
+<script>/*THREE*/</script>
+<script>/*TOPOJSON*/</script>
+<script>const WORLD = /*WORLD*/; const DATA = /*DATA*/;</script>
+<script>
+(function () {
+  const RAD = Math.PI / 180;
+  if (DATA.title) { document.getElementById("title").textContent = DATA.title; document.title = DATA.title; }
+  if (DATA.generated) document.getElementById("updated").textContent = "Last updated " + DATA.generated;
+  if (DATA.note) document.getElementById("note").textContent = DATA.note;
+  const canvas = document.getElementById("c");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+  let dist = 3.2;
+  const globe = new THREE.Group();
+  scene.add(globe);
+
+  function vec(lat, lon, r) {
+    r = r || 1;
+    const la = lat * RAD, lo = lon * RAD;
+    return new THREE.Vector3(r * Math.cos(la) * Math.sin(lo), r * Math.sin(la), r * Math.cos(la) * Math.cos(lo));
+  }
+
+  // ---- the globe: a dark sphere, a graticule, and country outlines ----
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.997, 64, 48), new THREE.MeshBasicMaterial({ color: 0x0b1b2e }));
+  globe.add(sphere);
+
+  function lineSet(segments, color, opacity, r) {
+    const pos = [];
+    for (const line of segments) {
+      for (let i = 1; i < line.length; i++) {
+        const a = line[i - 1], b = line[i];
+        const steps = Math.max(1, Math.ceil(Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) / 2));
+        for (let k = 0; k < steps; k++) {
+          const p = vec(a[1] + (b[1] - a[1]) * k / steps, a[0] + (b[0] - a[0]) * k / steps, r);
+          const q = vec(a[1] + (b[1] - a[1]) * (k + 1) / steps, a[0] + (b[0] - a[0]) * (k + 1) / steps, r);
+          pos.push(p.x, p.y, p.z, q.x, q.y, q.z);
+        }
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
+  }
+  const grat = [];
+  for (let lat = -60; lat <= 60; lat += 30) grat.push(Array.from({ length: 73 }, (_, i) => [-180 + i * 5, lat]));
+  for (let lon = -180; lon < 180; lon += 30) grat.push(Array.from({ length: 37 }, (_, i) => [lon, -90 + i * 5]));
+  globe.add(lineSet(grat, 0x1d3250, 0.7, 1.0));
+  globe.add(lineSet(topojson.mesh(WORLD, WORLD.objects.countries).coordinates, 0x4f7399, 1, 1.001));
+
+  // ---- aircraft ----
+  const ac = DATA.aircraft.filter(a => a.moves.length);
+  const NAMES = {};
+  ac.forEach(a => a.moves.forEach(m => { if (m.airport && m.name) NAMES[m.airport] = m.name; }));
+  const times = [];
+  ac.forEach((a, n) => {
+    a.color = new THREE.Color().setHSL(((n * 0.381966) % 1), 0.85, 0.62);
+    a.css = "#" + a.color.getHexString();
+    a.on = true;
+    a.group = new THREE.Group();
+    globe.add(a.group);
+    a.items = [];   // {t, obj}
+    a.hops = [];    // {t, w, mid}: the arcs, for placing the registration label
+    a.moves.forEach((m, i) => {
+      times.push(m.t);
+      const p = vec(m.lat, m.lon, 1.003);
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(m.airborne ? 0.005 : 0.009, 10, 8),
+        new THREE.MeshBasicMaterial({ color: a.color, transparent: m.airborne, opacity: m.airborne ? 0.6 : 1 }));
+      dot.position.copy(p);
+      a.group.add(dot);
+      a.items.push({ t: m.t, obj: dot, ident: m.airport && !m.airborne ? m.airport : "", pos: p });
+      if (i > 0) {
+        const prev = a.moves[i - 1];
+        const arc = arcLine(prev, m, a.color);
+        if (arc) {
+          a.group.add(arc.line); a.items.push({ t: m.t, obj: arc.line });
+          a.hops.push({ t: m.t, w: arc.w, mid: arc.mid });
+        }
+      }
+    });
+  });
+
+  function arcLine(a, b, color) {
+    const va = vec(a.lat, a.lon), vb = vec(b.lat, b.lon);
+    const w = Math.acos(Math.min(1, Math.max(-1, va.dot(vb))));
+    if (w < 0.002) return null;
+    const n = Math.max(8, Math.ceil(w * 40)), h = 0.14 * Math.min(1, w / Math.PI) + 0.01;
+    const pts = [];
+    let mid = null;
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      const p = va.clone().multiplyScalar(Math.sin((1 - t) * w)).add(vb.clone().multiplyScalar(Math.sin(t * w))).divideScalar(Math.sin(w));
+      pts.push(p.multiplyScalar(1.003 + h * Math.sin(Math.PI * t)));
+    }
+    const half = va.clone().add(vb).normalize().multiplyScalar(1.003 + h);   // halfway along the arc, at its peak
+    return {
+      line: new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })),
+      w, mid: half };
+  }
+
+  // ---- sidebar ----
+  const fmt = s => new Date(s * 1000).toISOString().replace("T", " ").slice(0, 16) + "Z";
+  const list = document.getElementById("list");
+  ac.forEach(a => {
+    const li = document.createElement("li");
+    const last = a.moves[a.moves.length - 1];
+    const lines = a.moves.filter(m => !m.quiet).map(m => fmt(m.t) + "  " + (m.airborne ? "near " : "") + (m.airport || "en route") +
+      (m.place ? "  " + m.place : "") + (m.airborne ? " (airborne)" : "")).join("<br>");
+    li.innerHTML =
+      '<div class="row"><input type="checkbox" checked><span class="sw" style="background:' + a.css + '"></span>' +
+      '<div class="name"><div><span class="tail">' + a.tail + '</span> <span class="tag">' + (a.rules || "") + '</span></div>' +
+      '<div class="sub">' + a.model + " &middot; " + (a.owner || "(none on file)") + '</div></div></div>' +
+      '<div class="detail">' + lines + '<br><a href="https://globe.adsbexchange.com/?icao=' + a.icao + '" target="_blank" rel="noopener">ADS-B Exchange</a>' +
+      ' &middot; <a href="#" class="focus">focus</a></div>';
+    li.querySelector("input").onchange = e => { a.on = e.target.checked; li.classList.toggle("off", !a.on); refresh(); };
+    li.querySelector(".name").onclick = () => li.classList.toggle("open");
+    li.querySelector(".focus").onclick = e => { e.preventDefault(); face(last.lat, last.lon); };
+    list.appendChild(li);
+    a.li = li;
+  });
+  function setAll(v) { ac.forEach(a => { a.on = v; a.li.querySelector("input").checked = v; a.li.classList.toggle("off", !v); }); refresh(); }
+  document.getElementById("all").onclick = () => setAll(true);
+  document.getElementById("none").onclick = () => setAll(false);
+
+  // ---- time slider and replay ----
+  const slider = document.getElementById("slider"), when = document.getElementById("when");
+  const tMin = Math.min(...times), tMax = Math.max(...times);
+  slider.min = 0; slider.max = 1000; slider.value = 1000;
+  const cutoff = () => tMin + (tMax - tMin) * slider.value / 1000;
+  slider.oninput = () => { stopPlay(); refresh(); };
+  let timer = null;
+  const playBtn = document.getElementById("play");
+  function stopPlay() { if (timer) { clearInterval(timer); timer = null; playBtn.innerHTML = "&#9654;"; } }
+  playBtn.onclick = () => {
+    if (timer) return stopPlay();
+    if (+slider.value >= 1000) slider.value = 0;
+    playBtn.innerHTML = "&#10074;&#10074;";
+    timer = setInterval(() => { slider.value = Math.min(1000, +slider.value + 4); refresh(); if (+slider.value >= 1000) stopPlay(); }, 40);
+  };
+
+  // ---- airport labels (one per airport) ----
+  const labelBox = document.getElementById("labels");
+  const labels = {};
+  let shownIdents = {};
+  ac.forEach(a => {
+    a.tag = document.createElement("div");
+    a.tag.className = "tag"; a.tag.textContent = a.tail; a.tag.style.color = a.css;
+    labelBox.appendChild(a.tag);
+  });
+  function refresh() {
+    const c = cutoff();
+    when.textContent = ac.length ? fmt(c) : "";
+    shownIdents = {};
+    ac.forEach(a => {
+      a.group.visible = a.on;
+      a.items.forEach(it => {
+        it.obj.visible = it.t <= c;
+        if (a.on && it.t <= c && it.ident) shownIdents[it.ident] = it.pos;
+      });
+    });
+    ac.forEach(a => {
+      // the registration goes at the middle of the longest hop shown so far, else on the latest position
+      a.tagPos = null;
+      if (!a.on) return;
+      let best = null;
+      a.hops.forEach(h => { if (h.t <= c && (!best || h.w > best.w)) best = h; });
+      if (best) a.tagPos = best.mid;
+      else { const d = a.items.filter(it => it.t <= c && it.pos); if (d.length) a.tagPos = d[d.length - 1].pos; }
+      a.tag.style.display = "none";
+    });
+    for (const id in labels) labels[id].style.display = "none";
+    for (const id in shownIdents) {
+      if (!labels[id]) { const d = document.createElement("div"); d.textContent = id + (NAMES[id] ? "  " + NAMES[id] : ""); labelBox.appendChild(d); labels[id] = d; }
+    }
+  }
+
+  // ---- hover an airport to list the aircraft that were on the ground there ----
+  const tip = document.getElementById("tip");
+  const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  const hitSpheres = [];   // a larger invisible sphere per airport, so the small dots are easy to hover
+  const seenIdent = {};
+  ac.forEach(a => a.items.forEach(it => {
+    if (it.ident && !seenIdent[it.ident]) {
+      seenIdent[it.ident] = true;
+      const h = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+      h.position.copy(it.pos); h.userData.ident = it.ident;
+      globe.add(h); hitSpheres.push(h);
+    }
+  }));
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const MAX_ROWS = 40;
+  function tipFor(id) {
+    const c = cutoff(), rows = [];
+    ac.forEach(a => { if (a.on) a.moves.forEach(m => { if (m.airport === id && !m.airborne && m.t <= c) rows.push({ t: m.t, a }); }); });
+    rows.sort((x, y) => x.t - y.t);
+    const shown = rows.slice(-MAX_ROWS);
+    return "<b>" + esc(id + (NAMES[id] ? "  " + NAMES[id] : "")) + "</b>" +
+      (rows.length > shown.length ? '<div class="more">' + (rows.length - shown.length) + " earlier not shown</div>" : "") +
+      shown.map(r => fmt(r.t) + '  <span style="color:' + r.a.css + '">' + esc(r.a.tail) + "</span>").join("<br>");
+  }
+  let hovered = null;
+  function hover(e) {
+    let id = null;
+    if (!drag) {
+      mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight * 2 - 1));
+      raycaster.setFromCamera(mouse, camera);
+      const hit = raycaster.intersectObjects([sphere].concat(hitSpheres))[0];   // the globe itself hides the far side
+      if (hit && hit.object.userData.ident && shownIdents[hit.object.userData.ident]) id = hit.object.userData.ident;
+    }
+    canvas.classList.toggle("hover", !!id);
+    if (!id) { tip.style.display = "none"; hovered = null; return; }
+    if (id !== hovered || e.type !== "pointermove") { tip.innerHTML = tipFor(id); hovered = id; }
+    tip.style.display = "block";
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.transform = "translate(" + Math.min(e.clientX + 14, innerWidth - w - 8) + "px," + Math.min(e.clientY + 14, innerHeight - h - 8) + "px)";
+  }
+  canvas.addEventListener("pointermove", hover);
+  canvas.addEventListener("pointerleave", () => { tip.style.display = "none"; hovered = null; });
+
+  // ---- view: drag to rotate, wheel to zoom, ease toward targets ----
+  let tx = 0, ty = 0;
+  function face(lat, lon) {
+    tx = lat * RAD;
+    let y = -lon * RAD;
+    ty = globe.rotation.y + Math.atan2(Math.sin(y - globe.rotation.y), Math.cos(y - globe.rotation.y));
+  }
+  (function initialView() {
+    const sum = new THREE.Vector3();
+    ac.forEach(a => a.moves.forEach(m => sum.add(vec(m.lat, m.lon))));
+    if (sum.length() < 1e-6) return face(-33.9, 151.2);
+    sum.normalize();
+    face(Math.asin(sum.y) / RAD, Math.atan2(sum.x, sum.z) / RAD);
+    globe.rotation.set(tx, ty, 0);
+  })();
+  let drag = null;
+  canvas.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY }; canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("drag"); });
+  canvas.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const k = 0.005 * dist / 3.2;
+    ty += (e.clientX - drag.x) * k;
+    tx = Math.max(-1.45, Math.min(1.45, tx + (e.clientY - drag.y) * k));
+    drag = { x: e.clientX, y: e.clientY };
+  });
+  canvas.addEventListener("wheel", e => { e.preventDefault(); dist = Math.max(1.35, Math.min(6, dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+
+  function resize() {
+    renderer.setSize(innerWidth, innerHeight, false);
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  }
+  addEventListener("resize", resize); resize();
+
+  const tmp = new THREE.Vector3();
+  function frame() {
+    globe.rotation.x += (tx - globe.rotation.x) * 0.15;
+    globe.rotation.y += (ty - globe.rotation.y) * 0.15;
+    camera.position.set(0, 0, dist);
+    renderer.render(scene, camera);
+    globe.updateMatrixWorld();
+    function screen(el, pos) {
+      tmp.copy(pos).applyMatrix4(globe.matrixWorld);
+      if (tmp.z * dist <= 1) { el.style.display = "none"; return null; }   // far side of the globe
+      tmp.project(camera);
+      el.style.display = "block";
+      return { el, x: (tmp.x + 1) / 2 * innerWidth + 8, y: (1 - tmp.y) / 2 * innerHeight - 6 };
+    }
+    const put = p => { p.el.style.transform = "translate(" + p.x + "px," + p.y + "px)"; };
+    const all = [];
+    for (const id in shownIdents) { const p = screen(labels[id], shownIdents[id]); if (p) all.push(p); }
+    ac.forEach(a => { if (a.tagPos) { const p = screen(a.tag, a.tagPos); if (p) all.push(p); } else a.tag.style.display = "none"; });
+    all.sort((a, b) => a.y - b.y || a.x - b.x);
+    const placed = [];
+    all.forEach(p => {   // push a label down until it no longer sits on another one
+      p.w = p.el.offsetWidth + 6;
+      while (placed.some(q => p.x < q.x + q.w && q.x < p.x + p.w && Math.abs(q.y - p.y) < 14)) p.y += 14;
+      placed.push(p); put(p);
+    });
+    requestAnimationFrame(frame);
+  }
+  if (!ac.length) document.getElementById("empty").style.display = "flex";
+  refresh();
+  frame();
+})();
+</script>
+</body>
+</html>
